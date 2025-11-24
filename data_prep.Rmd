@@ -1,0 +1,332 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-11-03"
+---
+```{r}
+library(tibble)
+library(terra)
+library(dplyr)
+library(comprehenr)
+library(lubridate)
+
+setwd('~/Downloads')
+
+end_year = 2024
+amo = read.table("hurricane_project/amon.us.long.data.txt",strip.white = TRUE)
+months = as.vector(amo[1,])
+colnames(amo) = months
+amo = amo[-1,]
+amo = amo[amo$Year>=1960,]
+amo = amo[amo$Year<=end_year,]
+amo = amo %>% mutate(amo=(as.numeric(May)+as.numeric(Jun))/2 )
+
+soi = read.table("hurricane_project/soi.txt",strip.white = TRUE)
+colnames(soi) = months
+soi = soi[soi$Year>=1960,]
+soi = soi[soi$Year<=end_year,]
+soi = soi %>% mutate(soi=(as.numeric(May)+as.numeric(Jun))/2 )
+
+nao = read.table("hurricane_project/nao.data.txt",strip.white = TRUE)
+colnames(nao) = months
+nao[nao$Year>=1960,]
+nao = nao[nao$Year>=1960,] 
+nao = nao[nao$Year<=end_year,]
+nao = nao %>% mutate(nao=(as.numeric(May)+as.numeric(Jun))/2 )
+
+nino = read.table("hurricane_project/nino.ascii",strip.white = TRUE)
+nino = nino[-1,c(1,2,9)]
+foo = matrix(NA, nrow=76, ncol=12)
+count=1
+for (i in 1:76){
+  for (j in 1:12){
+    foo[i,j]=nino[count,3]
+    count = count+1
+    if(count==911) break
+  }
+}
+foo = data.frame(foo)
+nino = add_column(foo, Year = 1950:2025,.before="X1")
+colnames(nino)=months
+nino = nino[nino$Year>=1960,]
+nino = nino[nino$Year<=end_year,]
+nino = nino %>% mutate(nino=(as.numeric(May)+as.numeric(Jun))/2 )
+```
+```{}
+tmpdir <- tempdir()
+untar("hurricane_project/sst.tar.gz", exdir = tmpdir)
+
+nc_files <- list.files(tmpdir, pattern = "\\.nc$", full.names = TRUE, recursive=TRUE)
+nc_files
+
+```
+```{}
+
+file <- nc_files[grepl("/tmp/RtmpeDAakl/data/netcdf3.0.2new/degree1/enh/sst.mean.nc", nc_files)]
+
+r <- rast(file)
+r
+
+```
+```{}
+df1 <- as.data.frame(r, xy = TRUE)
+head(df1)
+
+```
+```{}
+write.csv(df1,"hurricane_project/sst_raw.csv", row.names = FALSE)
+```
+```{r}
+setwd('~/Downloads')
+df1 = read.csv("hurricane_project/sst_raw.csv")
+df1 = filter(df1, x >= 280  & x <= 340)
+df1 = filter(df1, y >= 10  & y <= 25)
+```
+```{r}
+month = seq(as.Date("1960-01-01"), as.Date("2025-07-01"), by="month")
+sst_mean = to_vec(for(i in 3:789) mean(df1[,i],na.rm=T))
+
+sst_month = data.frame(date=month, sst_mean=sst_mean)
+sst_month = mutate(sst_month, year=year(date))
+
+may_jun = to_vec(for(i in 1:66) (sst_month[12*(i-1)+5,2] + sst_month[12*(i-1)+6,2])/2 )
+sst = data.frame(Year = 1960:2025, sst=may_jun)
+sst = sst[sst$Year<=end_year,]
+```
+
+
+```{r}
+setwd('~/Downloads')
+loss = read.csv("thunderbird.tmp/pid-41614/08302025_2024_aggregate.csv")
+met = read.csv("thunderbird.tmp/pid-41614/lf_matched_metrics.csv")
+hurdat = read.csv("thunderbird.tmp/pid-41614/hurdat_track-1761700598833.csv")
+
+df = merge(loss,met,by=c("storm_year","storm_name","storm_basin"))
+df = df[df$storm_year >= 1960,]
+df = df[,-3]
+
+hurdat = hurdat[hurdat$storm_year >= 1960,]
+
+# removing multiple landfalls, not relevant for this model
+df = filter(df, lf_id == 1)
+d = duplicated(df$hurdatId)
+df = df[!d,]
+```
+
+```{r}
+hurdat2 = filter(hurdat, !(storm_status %in% c('TD','DB','LO','WV','SD')))
+```
+
+```{r}
+name=''
+for (i in 1:nrow(hurdat2)){
+  if (hurdat2[i,]$storm_name != name) name = hurdat2[i,]$storm_name
+  else hurdat2[i,]$storm_name=NA
+}
+```
+
+```{r}
+dupe = is.na(hurdat2$storm_name)
+hurdat2 = hurdat2[!dupe,]
+```
+```{r}
+hurdat2 = mutate(hurdat2, ID=paste(as.character(storm_year),storm_name))
+df = mutate(df, ID=paste(as.character(storm_year),storm_name))
+```
+```{r}
+season = merge(hurdat2,df,by='ID',all=T)
+season = season[,c(3,4,5,30,31)]
+colnames(season) = c('storm_year','storm_name','datetime','mmh24','mmp24')
+season = season %>% mutate(storm_year_alt = ifelse(month(datetime)==1,storm_year-1,storm_year),mmp24 = ifelse(is.na(mmp24),0,mmp24),mmh24 = ifelse(is.na(mmh24),0,mmh24))
+
+```
+```{r}
+# dropped amo because data only until 2022, fix later
+# data prep
+
+N_obs = rep(NA,2025-1960)
+count=0
+year = 1960
+for (i in season$storm_year_alt){
+  if(i == year) count = count+1
+  else{
+    year = i
+    N_obs[year-1960] = count
+    count = 1
+  }
+}
+N_obs[65] = count
+
+row=1
+count=0
+L_obs = rep(NA,2025-1960)
+for (i in 1:65){
+  for (j in 1:N_obs[i]){
+    if (season$mmh24[row] > 0) count = count+1
+    row = row + 1
+  }
+  L_obs[i]=count
+  count = 0
+}
+
+row=1
+count=0
+D_obs = rep(NA,2025-1960)
+for (i in 1:65){
+  for (j in 1:N_obs[i]){
+    if (season$mmh24[row] > 0) count = count+season$mmh24[row]
+    row = row + 1
+  }
+  D_obs[i]=count
+  count = 0
+}
+
+Xraw = as.matrix(data.frame(sst$sst,soi$soi,nao$nao,nino$nino))
+```
+
+```{r}
+# install.packages(c("rstan","bayesplot","loo"))
+library(rstan); library(bayesplot); library(loo)
+
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+# ---- Preprocess covariates: scale (important if priors are vague) ----
+scale_cov <- function(x) if(is.numeric(x)) as.numeric((x - mean(x, na.rm=TRUE))/sd(x, na.rm=TRUE)) else x
+Xscaled <- as.matrix(apply(Xraw, 2, scale_cov))
+# ensure intercept: add column of 1s as first column if you want intercept
+if (!all(Xscaled[,1] == 1)) Xscaled <- cbind(intercept = 1, Xscaled)
+
+stan_data <- list(
+  N_years = length(N_obs),
+  N_obs = as.integer(N_obs),
+  L_obs = as.integer(L_obs),
+  D_obs = as.numeric(D_obs),
+  P = ncol(Xscaled),
+  X = Xscaled
+)
+
+# ---- Compile and sample ----
+stan_file <- "~/Downloads/hurricane_project/season1_model.stan"  # path to saved stan code
+fit <- stan(file = stan_file,
+            data = stan_data,
+            iter = 4000, warmup = 2000,
+            chains = 4, thin = 1,
+            control = list(adapt_delta = 0.95, max_treedepth = 15))
+
+print(fit, pars = c("beta", "r", "theta", "mu", "sigma"), probs = c(0.025, 0.5, 0.975))
+
+# ---- Diagnostics ----
+# traceplots
+traceplot(fit, pars = c("r", "theta", "mu", "sigma"))
+
+# extract posterior
+post <- extract(fit)
+# posterior predictive checks (simple)
+# simulate replicated D for each posterior draw is left for you; a simple check:
+log_lik_matrix <- extract(fit, "log_lik")$log_lik  # N_draws x N_years
+loo_res <- loo(log_lik_matrix)
+print(loo_res)
+```
+```{r}
+yr = 58
+post = rstan::extract(fit)
+S = length(post$theta)
+
+# Compute lambda for each posterior draw
+lambda_post = exp(Xscaled[yr,] %*% t(post$beta))
+lambda_post = as.numeric(lambda_post)
+
+# Predictive draws
+N_pred = rnbinom(S, mu=lambda_post, size=post$r)
+L_pred = rbinom(S, size = N_pred, prob=post$theta)
+
+D_pred = numeric(S)
+for (s in 1:S) {
+  if (N_pred[s] == 0) D_pred[s] <- 0
+  else {
+    p_pos <- 1 - (1 - post$theta[s])^N_pred[s]
+    if (runif(1) < p_pos) {
+      D_pred[s] <- rlnorm(1, meanlog=post$mu[s], sdlog=post$sigma[s])
+    } else {
+      D_pred[s] <- 0
+    }
+  }
+}
+
+# observed values
+N_obs_i <- N_obs[i]
+L_obs_i <- L_obs[i]
+D_obs_i <- D_obs[i]
+
+```
+
+```{r}
+library(ggplot2)
+
+dfN <- data.frame(N=N_pred)
+
+ggplot(dfN, aes(x=N)) +
+  geom_histogram(aes(y=after_stat(density)),
+                 bins=40, color="black", fill="lightblue") +
+  geom_vline(xintercept = N_obs_i, color="red", linetype="dashed", linewidth=1) +
+  labs(
+    title="Posterior Predictive: Storm Frequency",
+    x="N", y="Density"
+  ) +
+  theme_bw()
+
+
+dfL <- data.frame(L=L_pred)
+
+ggplot(dfL, aes(x=L)) +
+  geom_histogram(aes(y=after_stat(density)),
+                 bins=40, color="black", fill="lightblue") +
+  geom_vline(xintercept = L_obs_i, color="red", linetype="dashed", linewidth=1) +
+  labs(
+    title="Posterior Predictive: Landfall/Damaging Cyclone Frequency",
+    x="L", y="Density"
+  ) +
+  theme_bw()
+
+
+# Probability of zero damage
+p_zero <- mean(D_pred == 0)
+p_pos  <- 1 - p_zero
+
+dfD <- data.frame(D = D_pred)
+dfD = mutate(dfD,logD = ifelse(D_pred > 0,log(D_pred),0))
+
+ggplot(dfD, aes(x=logD)) +
+  geom_histogram(aes(y=after_stat(density)),
+                 bins=40, fill="lightblue", color="black") +
+  geom_vline(xintercept = log(D_obs_i), color="red", linetype="dashed", linewidth=1) +
+  labs(
+    title="Posterior Predictive: Storm Damage (log scale)",
+    x="log(Damage)", y="Density"
+  ) +
+  annotate("text", x=Inf, y=Inf, hjust=1.1, vjust=2,
+           label=sprintf("%.2f chance of $0 Damage", p_zero),
+           size=4) +
+  annotate("text", x=Inf, y=Inf, hjust=1.1, vjust=4,
+           label=sprintf("%.2f chance of log(Damage)\nin this distribution", p_pos),
+           size=4) +
+  theme_bw()
+
+```
+```{r}
+F_hat0 = function(param_post){mean(param_post<=0)}
+depth_1D = function(param_post) 4 * F_hat0(param_post) * (1-F_hat0(param_post)) 
+
+
+for (i in 1:5){
+  print(names(post[i]))
+  for (j in 1:ncol(as.matrix(post[[i]]))) print(depth_1D(as.matrix(post[[i]])[,j]))
+}
+```
+
+```{r}
+# GEV
+df_gev = filter(df,is.na(windspeed)==FALSE)
+```
+
