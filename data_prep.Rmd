@@ -1,8 +1,12 @@
 ---
-title: "Untitled"
+# title: "Untitled"
 output: html_document
 date: "2025-11-03"
 ---
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = '~/Downloads')
+```
+
 ```{r}
 library(tibble)
 library(terra)
@@ -52,7 +56,7 @@ nino = nino[nino$Year>=1960,]
 nino = nino[nino$Year<=end_year,]
 nino = nino %>% mutate(nino=(as.numeric(May)+as.numeric(Jun))/2 )
 ```
-```{}
+```{r}
 tmpdir <- tempdir()
 untar("hurricane_project/sst.tar.gz", exdir = tmpdir)
 
@@ -60,24 +64,25 @@ nc_files <- list.files(tmpdir, pattern = "\\.nc$", full.names = TRUE, recursive=
 nc_files
 
 ```
-```{}
+```{r}
 
-file <- nc_files[grepl("/tmp/RtmpeDAakl/data/netcdf3.0.2new/degree1/enh/sst.mean.nc", nc_files)]
+file <- nc_files[grepl("/tmp/RtmpXueFnm/data/netcdf3.0.2new/degree1/enh/sst.mean.nc", nc_files)]
 
 r <- rast(file)
 r
 
 ```
-```{}
+```{r}
 df1 <- as.data.frame(r, xy = TRUE)
 head(df1)
 
 ```
-```{}
+```{r}
 write.csv(df1,"hurricane_project/sst_raw.csv", row.names = FALSE)
 ```
 ```{r}
 setwd('~/Downloads')
+list.files()
 df1 = read.csv("hurricane_project/sst_raw.csv")
 df1 = filter(df1, x >= 280  & x <= 340)
 df1 = filter(df1, y >= 10  & y <= 25)
@@ -206,6 +211,7 @@ stan_data <- list(
   X = Xscaled
 )
 
+
 # ---- Compile and sample ----
 stan_file <- "~/Downloads/hurricane_project/season1_model.stan"  # path to saved stan code
 fit <- stan(file = stan_file,
@@ -324,6 +330,7 @@ for (i in 1:5){
   for (j in 1:ncol(as.matrix(post[[i]]))) print(depth_1D(as.matrix(post[[i]])[,j]))
 }
 ```
+
 
 ```{r}
 # GEV
