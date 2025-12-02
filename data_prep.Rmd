@@ -346,7 +346,7 @@ df = df[!d,]
 X_year = cbind(Xraw, storm_year = 1960:2024)
 
 df = merge(df, X_year, by="storm_year")
-df = filter(df, is.na(windspeed)==FALSE)
+df = filter(df, is.na(windspeed)==FALSE, is.na(pressure)==FALSE)
 df = mutate(df, month = month(datetime))
 X_raw2 = df[,c(28:34,1)]
 
@@ -374,6 +374,9 @@ scale_cols <- setdiff(cov_names, "intercept")
 X_raw2[scale_cols] <- scale(X_raw2[scale_cols])
 
 X <- as.matrix(X_raw2[, cov_names])
+X <- cbind(X[,9],X[,1:8])
+cov_names <- c( "intercept","lat", "lon", "sst", "soi", "nao", "nino", "month","year")
+
 Z1 <- df$log_minCP
 Y1 <- df$log_maxWS
 Y2 <- df$log_damage
@@ -388,14 +391,245 @@ stan_data <- list(
 )
 
 # --- Compile and fit ---
+init_fun <- function() {
+  list(
+    alpha = rep(0, p),
+    beta  = rep(0, p+1),
+    gamma = rep(0, p+2),
+
+    inv_sigma2_z1 = 1,   # sigma = 1
+    inv_sigma2_y1 = 1,
+    inv_sigma2_y2 = 1,
+
+    xi_z1 = 0,
+    xi_y1 = 0,
+    xi_y2 = 0
+  )
+}
+
 stan_file <- "hurricane_project/gev_individual.stan"
 fit <- stan(file = stan_file,
             data = stan_data,
             chains = 4, iter = 4000, warmup = 2000,
+            init = init_fun,
             control = list(adapt_delta = 0.95, max_treedepth = 15))
 
 print(fit, pars = c("alpha", "beta", "gamma", "sigma_z1_out", "sigma_y1_out", "sigma_y2_out",
                     "xi_z1", "xi_y1", "xi_y2"), probs = c(0.025, 0.5, 0.975))
 
 ```
+```{r}
+library(extRemes)
+post <- rstan::extract(fit)
+mu_z1 = post$alpha %*% X[94,]
+mu_y1 = post$beta %*% c(Z1[94],X[94,])
+mu_y2 = post$gamma %*% c(Z1[94],Y1[94],X[94,])
+
+mean(mu_z1)
+mean(mu_y1)
+mean(mu_y2)
+
+Z1_harvey = revd(S,loc=mu_z1,scale=post$sigma_z1,shape=post$xi_z1,type="GEV")
+Y1_harvey = revd(S,loc=mu_y1,scale=post$sigma_y1,shape=post$xi_y1,type="GEV")
+Y2_harvey = revd(S,loc=mu_y2,scale=post$sigma_y2,shape=post$xi_y2,type="GEV")
+
+
+dfp <- data.frame(log_pressure=Z1_harvey)
+
+ggplot(dfp, aes(x=log_pressure)) +
+  geom_histogram(aes(y=after_stat(density)),
+                 bins=40, color="black", fill="lightblue") +
+  geom_vline(xintercept = Z1[94], color="red", linetype="dashed", linewidth=1) +
+  labs(
+    title="Posterior Predictive: Storm Frequency",
+    x="log_pressure", y="Density"
+  ) +
+  theme_bw()
+
+dfw <- data.frame(log_ws=Y1_harvey)
+
+ggplot(dfw, aes(x=log_ws)) +
+  geom_histogram(aes(y=after_stat(density)),
+                 bins=20, color="black", fill="lightblue") +
+  geom_vline(xintercept = Y1[94], color="red", linetype="dashed", linewidth=1) +
+  labs(
+    title="Posterior Predictive: Storm Frequency",
+    x="log_ws", y="Density"
+  ) +
+  theme_bw()
+
+dfd <- data.frame(log_damage=Y2_harvey)
+
+ggplot(dfd, aes(x=log_damage)) +
+  geom_histogram(aes(y=after_stat(density)),
+                 bins=20, color="black", fill="lightblue") +
+  geom_vline(xintercept = Y2[94], color="red", linetype="dashed", linewidth=1) +
+  labs(
+    title="Posterior Predictive: Storm Frequency",
+    x="log_damage", y="Density"
+  ) +
+  theme_bw()
+```
+
+```{r}
+# Required packages
+library(rstan)       # for extract
+library(dplyr)
+library(tidyr)
+library(knitr)
+
+# ---------- Utility: 1D depth ----------
+one_d_depth <- function(draws) {
+  F0 <- mean(draws <= 0)
+  4 * F0 * (1 - F0)
+}
+
+# ---------- Main function ----------
+# fit: stanfit object
+# cov_names: character vector length p with covariate names (including "Intercept")
+# returns: data.frame matching paper Table 1 (rows in same conceptual order)
+build_table1_individual <- function(fit, cov_names) {
+  post <- rstan::extract(fit, permuted = TRUE)
+  # Ensure expected named elements exist
+  stopifnot(!is.null(post$alpha), !is.null(post$beta), !is.null(post$gamma))
+  # p
+  p <- length(cov_names)
+  # Check sizes
+  if (ncol(post$alpha) != p) stop("post$alpha should have p columns matching cov_names")
+  if (ncol(post$beta) != (p + 1)) stop("post$beta should have p+1 columns (beta[1]=Z1, then p covariates)")
+  if (ncol(post$gamma) != (p + 2)) stop("post$gamma should have p+2 columns (gamma[1]=Z1,gamma[2]=Y1, then p covariates)")
+
+  # compute depths
+  depth_alpha <- apply(post$alpha, 2, one_d_depth)           # length p
+  depth_beta_z1 <- one_d_depth(post$beta[,1])                # scalar
+  depth_beta_X  <- apply(post$beta[, 2:(p+1)], 2, one_d_depth) # length p
+  depth_gamma_z1 <- one_d_depth(post$gamma[,1])
+  depth_gamma_y1 <- one_d_depth(post$gamma[,2])
+  depth_gamma_X  <- apply(post$gamma[, 3:(p+2)], 2, one_d_depth)
+
+  depth_xi <- c(
+    one_d_depth(post$xi_z1),
+    one_d_depth(post$xi_y1),
+    one_d_depth(post$xi_y2)
+  )
+  depth_sigma <- c(
+    one_d_depth(post$sigma_z1_out),
+    one_d_depth(post$sigma_y1_out),
+    one_d_depth(post$sigma_y2_out)
+  )
+
+  # Build rows in the same conceptual order as paper:
+  # 1. Intercept (and other covariates) for Min CP (alpha block): p rows
+  # 2. "Min CP (scaled)" (this is beta[1]) then covariates for MaxWS (beta X): 1 + p
+  # 3. "Min CP (scaled)", "Max WS (scaled)" then covariates for Damages (gamma X): 2 + p
+  # 4. xi and sigma rows
+
+  # Row labels
+  rows_alpha <- cov_names                       # p
+  rows_beta  <- c("Min CP (scaled)", cov_names) # 1 + p
+  rows_gamma <- c("Min CP (scaled)", "Max WS (scaled)", cov_names) # 2 + p
+  rows_xi_sigma <- c("ξ", "σ")  # we will expand to 3 xi & 3 sigma rows across columns
+
+  # Build a full row order vector (paper lists covariates once, but shows columns across three models)
+  # We'll produce a table with one combined set of variable rows:
+  # We'll use the covariate list once and then add two special "Min CP (scaled)" and "Max WS (scaled)" rows
+  # The paper shows covariates in a single block; to match layout we will output a table where each row
+  # corresponds to a covariate or special row, and columns correspond to MinCP/MaxWS/Damages.
+
+  # Primary variable rows: covariates once, plus 2 special rows where they appear NA as needed.
+  primary_rows <- c("Intercept", cov_names[cov_names != "Intercept"]) # ensure intercept first
+  # But the paper lists Min CP (scaled) and Max WS (scaled) as rows too, so we append them below covariates to match their layout.
+  # We'll mimic the PDF layout: first Intercept, then covariates (Min CP and Max WS appear as NA where not applicable),
+  main_rows <- primary_rows
+
+  # Build empty dataframe
+  tableN <- data.frame(
+    Variable = character(),
+    MinCP = numeric(),
+    MaxWS = numeric(),
+    Damages = numeric(),
+    stringsAsFactors = FALSE
+  )
+
+  # 1) add covariates rows (these correspond to alpha coefficients for MinCP, and also beta_X / gamma_X)
+  for (i in seq_len(p)) {
+    nm <- cov_names[i]
+    mincp_val <- depth_alpha[i]
+    maxws_val <- depth_beta_X[i]    # note: beta_X corresponds to covariates for MaxWS
+    damage_val <- depth_gamma_X[i]
+    tableN <- rbind(tableN, data.frame(Variable = nm,
+                                       MinCP = mincp_val,
+                                       MaxWS = maxws_val,
+                                       Damages = damage_val,
+                                       stringsAsFactors = FALSE))
+  }
+
+  # 2) insert rows for "Min CP (scaled)" and "Max WS (scaled)" that appear in paper
+  # Paper shows "Min CP (scaled)" row: NA for MinCP column, MaxWS gets depth_beta_z1, Damages gets depth_gamma_z1
+  # Paper shows "Max WS (scaled)" row: NA for MinCP and MaxWS columns; Damages gets depth for gamma_y1 or maybe gamma entry for MaxWS scaled
+  # From excerpt, "Min CP (scaled)" listed under Variables with entries NA, 0.0000, 0.0177
+  # and "Max WS (scaled)" listed with NA, NA, 0.2479
+  # So we follow that: add two rows like the PDF.
+  tableN <- rbind(
+    tableN,
+    data.frame(Variable = "Min CP (scaled)",
+               MinCP = NA_real_,
+               MaxWS = depth_beta_z1,
+               Damages = depth_gamma_z1,
+               stringsAsFactors = FALSE)
+  )
+
+  tableN <- rbind(
+    tableN,
+    data.frame(Variable = "Max WS (scaled)",
+               MinCP = NA_real_,
+               MaxWS = NA_real_,
+               Damages = depth_gamma_y1,
+               stringsAsFactors = FALSE)
+  )
+
+  # 3) xi and sigma rows:
+  # The paper shows a single ξ and σ row but with three columns; we will add rows for ξ and σ and put values across columns.
+  tableN <- rbind(
+    tableN,
+    data.frame(Variable = "ξ",
+               MinCP = depth_xi[1],
+               MaxWS = depth_xi[2],
+               Damages = depth_xi[3],
+               stringsAsFactors = FALSE)
+  )
+
+  tableN <- rbind(
+    tableN,
+    data.frame(Variable = "σ",
+               MinCP = depth_sigma[1],
+               MaxWS = depth_sigma[2],
+               Damages = depth_sigma[3],
+               stringsAsFactors = FALSE)
+  )
+
+  # Round for display to 4 decimals (as in paper)
+  tableN$MinCP <- round(tableN$MinCP, 4)
+  tableN$MaxWS <- round(tableN$MaxWS, 4)
+  tableN$Damages <- round(tableN$Damages, 4)
+
+  # Replace NaN with NA
+  tableN[] <- lapply(tableN, function(x) replace(x, is.nan(x), NA))
+
+  # Return
+  return(tableN)
+}
+
+# ---------- Example usage ----------
+# covariate names in same order as X in Stan (including intercept)
+# e.g. cov_names <- c("Intercept","Avg.Lat","Avg.Lon","StartMonth","Year","NAO","SOI","AMO","ANOM3.4","Atl_SST","Sunspots")
+# Provide the real covariate names you used
+# cov_names <- c("Intercept", ...)
+
+table1 <- build_table1_individual(fit, cov_names)
+print(table1)
+
+
+```
+
 

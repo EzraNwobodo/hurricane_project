@@ -1,3 +1,21 @@
+functions {
+  // GEV log density for one observation
+  real gev1_lpdf(real x, real mu, real sigma, real xi) {
+    real z;
+    if (fabs(xi) < 1e-12) {
+      // Gumbel
+      real t = (x - mu) / sigma;
+      return -log(sigma) - t - exp(-t);
+    } else {
+      z = 1 + xi * ( (x - mu) / sigma );
+      if (z <= 0) {
+        return negative_infinity();
+      }
+      return -log(sigma) + (-1 - 1.0/xi) * log(z) - pow(z, -1.0/xi);
+    }
+  }
+}
+
 data {
   int<lower=1> N;             // number of cyclones / observations
   int<lower=1> p;             // number of covariates (including intercept) for X
@@ -26,23 +44,7 @@ transformed parameters {
   real<lower=0> sigma_y1 = sqrt(1.0 / inv_sigma2_y1);
   real<lower=0> sigma_y2 = sqrt(1.0 / inv_sigma2_y2);
 }
-functions {
-  // GEV log density for one observation
-  real gev_lpdf_one(real x, real mu, real sigma, real xi) {
-    real z;
-    if (fabs(xi) < 1e-12) {
-      // Gumbel
-      real t = (x - mu) / sigma;
-      return -log(sigma) - t - exp(-t);
-    } else {
-      z = 1 + xi * ( (x - mu) / sigma );
-      if (z <= 0) {
-        return negative_infinity();
-      }
-      return -log(sigma) + (-1 - 1.0/xi) * log(z) - pow(z, -1.0/xi);
-    }
-  }
-}
+
 model {
   // Priors
   alpha ~ normal(0, 1e2);       // N(0, 10^2)
@@ -61,9 +63,9 @@ model {
     real mu_y1 = beta[1] * Z1[i] + dot_product(row(X, i), beta[2:p+1]); // beta[1] is coef for Z1
     real mu_y2 = gamma[1] * Z1[i] + gamma[2] * Y1[i] + dot_product(row(X, i), gamma[3:p+2]);
 
-    target += gev_lpdf_one(Z1[i] | mu_z1, sigma_z1, xi_z1);
-    target += gev_lpdf_one(Y1[i] | mu_y1, sigma_y1, xi_y1);
-    target += gev_lpdf_one(Y2[i] | mu_y2, sigma_y2, xi_y2);
+    target += gev1_lpdf(Z1[i] | mu_z1, sigma_z1, xi_z1);
+    target += gev1_lpdf(Y1[i] | mu_y1, sigma_y1, xi_y1);
+    target += gev1_lpdf(Y2[i] | mu_y2, sigma_y2, xi_y2);
   }
 }
 generated quantities {
