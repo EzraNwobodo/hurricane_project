@@ -2,11 +2,12 @@ functions {
   // GEV log density for one observation
   real gev1_lpdf(real x, real mu, real sigma, real xi) {
     real z;
-    if (fabs(xi) < 1e-12) {
+    if (abs(xi) < 1e-12) {
       // Gumbel
       real t = (x - mu) / sigma;
       return -log(sigma) - t - exp(-t);
-    } else {
+    } 
+    else {
       z = 1 + xi * ( (x - mu) / sigma );
       if (z <= 0) {
         return negative_infinity();

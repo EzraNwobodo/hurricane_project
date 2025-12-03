@@ -632,4 +632,622 @@ print(table1)
 
 ```
 
+```{r}
+# ---------------------------------------------
+# Metropolis–Hastings sampler for individual GEV model
+# Using your data format:
+#   X   : N x p matrix with columns:
+#         cov_names <- c("intercept","lat","lon","sst","soi","nao","nino","month","year")
+#         (non-intercept columns already scaled)
+#   Z1  : df$log_minCP
+#   Y1  : df$log_maxWS
+#   Y2  : df$log_damage
+# ---------------------------------------------
+
+library(MASS)
+
+# ---- 1. Data assumptions ----
+# X, Z1, Y1, Y2 must exist in your environment
+cov_names <- c("intercept","lat","lon","sst","soi","nao","nino","month","year")
+
+X  <- as.matrix(X)
+Z1 <- as.numeric(Z1)
+Y1 <- as.numeric(Y1)
+Y2 <- as.numeric(Y2)
+
+N <- nrow(X)
+p <- ncol(X)
+stopifnot(p == length(cov_names))
+
+# ---- 2. GEV log-pdf (scalar) ----
+gev_logpdf_vec <- function(x, mu, sigma, xi) {
+  # x, mu, sigma, xi: vectors of same length or scalars recycled
+  x   <- as.numeric(x)
+  mu  <- as.numeric(mu)
+  sigma <- as.numeric(sigma)
+  xi  <- as.numeric(xi)
+  n <- length(x)
+  out <- numeric(n)
+  for (i in seq_len(n)) {
+    xi_i <- xi[min(i, length(xi))]
+    mu_i <- mu[min(i, length(mu))]
+    s_i  <- sigma[min(i, length(sigma))]
+    x_i  <- x[i]
+    if (s_i <= 0) {
+      out[i] <- -Inf
+    } else if (abs(xi_i) < 1e-10) {
+      # Gumbel limit
+      t <- (x_i - mu_i) / s_i
+      out[i] <- -log(s_i) - t - exp(-t)
+    } else {
+      z <- 1 + xi_i * ((x_i - mu_i) / s_i)
+      if (z <= 0) {
+        out[i] <- -Inf
+      } else {
+        inv_xi <- 1 / xi_i
+        logz   <- log(z)
+        out[i] <- -log(s_i) + (-1 - inv_xi) * logz - exp(-inv_xi * logz)
+      }
+    }
+  }
+  out
+}
+
+# ---- 3. Transform xi from unconstrained u to bounded interval ----
+xi_z1_lower <- -1
+xi_z1_upper <-  1
+xi_y_lower  <- -0.55
+xi_y_upper  <-  0.5
+
+inv_logit <- function(u) 1 / (1 + exp(-u))
+
+u_to_xi_z1 <- function(u) {
+  xi_z1_lower + (xi_z1_upper - xi_z1_lower) * inv_logit(u)
+}
+u_to_xi_y <- function(u) {
+  xi_y_lower + (xi_y_upper - xi_y_lower) * inv_logit(u)
+}
+
+# ---- 4. Log-prior (up to additive constant) ----
+log_prior <- function(par) {
+  # par is a list with:
+  # alpha[p], beta[p+1], gamma[p+2],
+  # log_sigma_z1, log_sigma_y1, log_sigma_y2,
+  # xi_z1_u, xi_y1_u, xi_y2_u
+
+  lp <- 0
+
+  # Priors from paper:
+  # alpha ~ N(0, 10^2)
+  # beta  ~ N(0, 10^3)
+  # gamma ~ N(0, 10^2)
+  lp <- lp + sum(dnorm(par$alpha, 0, 10,   log = TRUE))
+  lp <- lp + sum(dnorm(par$beta,  0, 1000, log = TRUE))
+  lp <- lp + sum(dnorm(par$gamma, 0, 10,   log = TRUE))
+
+  # 1/sigma^2 ~ Gamma(1, 3)
+  # t = 1/sigma^2 ; t ~ Gamma(shape=1, scale=3)
+  # log p(sigma) = log p(t) + log |dt/dsigma|
+  # dt/dsigma = -2/sigma^3 => |dt/dsigma| = 2/sigma^3
+  for (ls in c("log_sigma_z1","log_sigma_y1","log_sigma_y2")) {
+    sigma <- exp(par[[ls]])
+    t <- 1 / (sigma^2)
+    lp <- lp + dgamma(t, shape = 1, scale = 3, log = TRUE) + log(2) - 3 * log(sigma)
+  }
+
+  # Uniform priors on xi with bounds; in u-space we include Jacobian:
+  # xi = a + (b-a)*inv_logit(u)
+  # dxi/du = (b-a)*inv_logit(u)*(1-inv_logit(u))
+  # log p(u) = const + log(dxi/du)
+  u <- par$xi_z1_u
+  lp <- lp + log((xi_z1_upper - xi_z1_lower) *
+                 inv_logit(u) * (1 - inv_logit(u)))
+
+  for (u_name in c("xi_y1_u","xi_y2_u")) {
+    uu <- par[[u_name]]
+    lp <- lp + log((xi_y_upper - xi_y_lower) *
+                   inv_logit(uu) * (1 - inv_logit(uu)))
+  }
+
+  lp
+}
+
+# ---- 5. Log-likelihood ----
+log_lik <- function(par) {
+  # unpack
+  alpha <- par$alpha
+  beta  <- par$beta
+  gamma <- par$gamma
+
+  mu_z1 <- as.numeric(X %*% alpha)
+  mu_y1 <- beta[1] * Z1 + as.numeric(X %*% beta[2:(p+1)])
+  mu_y2 <- gamma[1] * Z1 + gamma[2] * Y1 + as.numeric(X %*% gamma[3:(p+2)])
+
+  sigma_z1 <- exp(par$log_sigma_z1)
+  sigma_y1 <- exp(par$log_sigma_y1)
+  sigma_y2 <- exp(par$log_sigma_y2)
+
+  xi_z1 <- u_to_xi_z1(par$xi_z1_u)
+  xi_y1 <- u_to_xi_y(par$xi_y1_u)
+  xi_y2 <- u_to_xi_y(par$xi_y2_u)
+
+  ll_z1 <- gev_logpdf_vec(Z1, mu_z1, sigma_z1, rep(xi_z1, N))
+  ll_y1 <- gev_logpdf_vec(Y1, mu_y1, sigma_y1, rep(xi_y1, N))
+  ll_y2 <- gev_logpdf_vec(Y2, mu_y2, sigma_y2, rep(xi_y2, N))
+
+  total <- sum(ll_z1) + sum(ll_y1) + sum(ll_y2)
+  total
+}
+
+log_post <- function(par) {
+  lp <- log_prior(par)
+  if (!is.finite(lp)) return(-Inf)
+  ll <- log_lik(par)
+  if (!is.finite(ll)) return(-Inf)
+  lp + ll
+}
+
+# ---- 6. Initial values ----
+init_par <- function() {
+  list(
+    alpha = rep(0, p),
+    beta  = rep(0, p + 1),
+    gamma = rep(0, p + 2),
+    log_sigma_z1 = log(sd(Z1)),
+    log_sigma_y1 = log(sd(Y1)),
+    log_sigma_y2 = log(sd(Y2)),
+    xi_z1_u = 0,
+    xi_y1_u = 0,
+    xi_y2_u = 0
+  )
+}
+
+# ---- 7. Random-walk proposals ----
+propose_block <- function(curr, scales) {
+  rnorm(length(curr), mean = curr, sd = scales)
+}
+
+# ---- 8. MH driver ----
+run_mh <- function(
+  Niter         = 100000,
+  burnin        = 20000,
+  thin          = 10,
+  target_accept = 0.20,
+  adapt_every   = 1000
+) {
+  Niter   <- as.integer(Niter)
+  burnin  <- as.integer(burnin)
+  thin    <- as.integer(thin)
+  adapt_every <- as.integer(adapt_every)
+
+  par_curr <- init_par()
+  lp_curr  <- log_post(par_curr)
+  if (!is.finite(lp_curr)) stop("Initial log posterior is -Inf; tweak init.")
+
+  # Proposal scales (tuned during burn-in)
+  scale_alpha <- rep(0.02, p)
+  scale_beta  <- rep(0.02, p + 1)
+  scale_gamma <- rep(0.02, p + 2)
+  
+  # smaller initial scales for intercepts & Z1/Y1 terms
+  scale_alpha[1] <- 0.01         # alpha intercept
+  scale_beta[1]  <- 0.01         # coef on Z1 in Y1 model
+  scale_gamma[1] <- 0.01         # coef on Z1 in Y2 model
+  scale_gamma[2] <- 0.01         # coef on Y1 in Y2 model
+
+  scale_logs   <- rep(0.05, 3)
+  scale_xi_u   <- rep(0.10, 3)
+
+  # Acceptance counters per block
+  acc_alpha <- acc_beta <- acc_gamma <- acc_logs <- acc_xi <- 0L
+  tot_alpha <- tot_beta <- tot_gamma <- tot_logs <- tot_xi <- 0L
+
+  # Storage indices
+  keep_idx <- seq(burnin + 1, Niter, by = thin)
+  n_keep   <- length(keep_idx)
+
+  samples <- list(
+    alpha     = matrix(NA_real_, nrow = n_keep, ncol = p),
+    beta      = matrix(NA_real_, nrow = n_keep, ncol = p + 1),
+    gamma     = matrix(NA_real_, nrow = n_keep, ncol = p + 2),
+    log_sigma = matrix(NA_real_, nrow = n_keep, ncol = 3),
+    xi_u      = matrix(NA_real_, nrow = n_keep, ncol = 3),
+    logpost   = numeric(n_keep)
+  )
+  keep_i <- 0L
+
+  for (iter in 1:Niter) {
+
+    # ---- alpha block: component-wise updates ----
+    for (j in 1:p) {
+      tot_alpha <- tot_alpha + 1L
+      prop_par <- par_curr
+      # propose only alpha[j]
+      prop_par$alpha[j] <- rnorm(1, par_curr$alpha[j], scale_alpha[j])
+      lp_prop <- log_post(prop_par)
+      if (is.finite(lp_prop) && log(runif(1)) < (lp_prop - lp_curr)) {
+        par_curr <- prop_par
+        lp_curr  <- lp_prop
+        acc_alpha <- acc_alpha + 1L
+      }
+    }
+
+
+    # ---- beta block: component-wise updates ----
+    for (j in 1:(p+1)) {
+      tot_beta <- tot_beta + 1L
+      prop_par <- par_curr
+      prop_par$beta[j] <- rnorm(1, par_curr$beta[j], scale_beta[j])
+      lp_prop <- log_post(prop_par)
+      if (is.finite(lp_prop) && log(runif(1)) < (lp_prop - lp_curr)) {
+        par_curr <- prop_par
+        lp_curr  <- lp_prop
+        acc_beta <- acc_beta + 1L
+      }
+    }
+
+
+    # ---- gamma block: component-wise updates ----
+    for (j in 1:(p+2)) {
+      tot_gamma <- tot_gamma + 1L
+      prop_par <- par_curr
+      prop_par$gamma[j] <- rnorm(1, par_curr$gamma[j], scale_gamma[j])
+      lp_prop <- log_post(prop_par)
+      if (is.finite(lp_prop) && log(runif(1)) < (lp_prop - lp_curr)) {
+        par_curr <- prop_par
+        lp_curr  <- lp_prop
+        acc_gamma <- acc_gamma + 1L
+      }
+    }
+
+    # ---- log sigma block (3) ----
+    tot_logs <- tot_logs + 1L
+    prop_par <- par_curr
+    logs_vec <- c(par_curr$log_sigma_z1, par_curr$log_sigma_y1, par_curr$log_sigma_y2)
+    logs_prop <- propose_block(logs_vec, scale_logs)
+    prop_par$log_sigma_z1 <- logs_prop[1]
+    prop_par$log_sigma_y1 <- logs_prop[2]
+    prop_par$log_sigma_y2 <- logs_prop[3]
+    lp_prop <- log_post(prop_par)
+    if (is.finite(lp_prop) && log(runif(1)) < (lp_prop - lp_curr)) {
+      par_curr <- prop_par
+      lp_curr  <- lp_prop
+      acc_logs <- acc_logs + 1L
+    }
+
+    # ---- xi_u block (3) ----
+    tot_xi <- tot_xi + 1L
+    prop_par <- par_curr
+    xi_u_vec  <- c(par_curr$xi_z1_u, par_curr$xi_y1_u, par_curr$xi_y2_u)
+    xi_u_prop <- propose_block(xi_u_vec, scale_xi_u)
+    prop_par$xi_z1_u <- xi_u_prop[1]
+    prop_par$xi_y1_u <- xi_u_prop[2]
+    prop_par$xi_y2_u <- xi_u_prop[3]
+    lp_prop <- log_post(prop_par)
+    if (is.finite(lp_prop) && log(runif(1)) < (lp_prop - lp_curr)) {
+      par_curr <- prop_par
+      lp_curr  <- lp_prop
+      acc_xi <- acc_xi + 1L
+    }
+
+    # ---- adaptive tuning during burn-in ----
+    if (iter <= burnin && (iter %% adapt_every == 0)) {
+      a_alpha <- acc_alpha / max(1, tot_alpha)
+      a_beta  <- acc_beta  / max(1, tot_beta)
+      a_gamma <- acc_gamma / max(1, tot_gamma)
+      a_logs  <- acc_logs  / max(1, tot_logs)
+      a_xi    <- acc_xi    / max(1, tot_xi)
+
+      adapt <- function(scale, acc_rate) {
+        if (is.na(acc_rate)) return(scale)
+        if (acc_rate > target_accept + 0.05) {
+          scale * 1.1
+        } else if (acc_rate < target_accept - 0.05) {
+          scale / 1.1
+        } else {
+          scale
+        }
+      }
+
+      scale_alpha <- adapt(scale_alpha, a_alpha)
+      scale_beta  <- adapt(scale_beta,  a_beta)
+      scale_gamma <- adapt(scale_gamma, a_gamma)
+      scale_logs  <- adapt(scale_logs,  a_logs)
+      scale_xi_u  <- adapt(scale_xi_u,  a_xi)
+
+      # reset counters for next adaptation window
+      acc_alpha <- acc_beta <- acc_gamma <- acc_logs <- acc_xi <- 0L
+      tot_alpha <- tot_beta <- tot_gamma <- tot_logs <- tot_xi <- 0L
+
+      cat("adapt at iter", iter,
+          "acc(alpha,beta,gamma,logs,xi)=",
+          round(c(a_alpha,a_beta,a_gamma,a_logs,a_xi),3), "\n")
+    }
+
+    # ---- store post-burnin, thinned ----
+    if (iter > burnin && ((iter - burnin) %% thin == 0)) {
+      keep_i <- keep_i + 1L
+      samples$alpha[keep_i, ]     <- par_curr$alpha
+      samples$beta[keep_i, ]      <- par_curr$beta
+      samples$gamma[keep_i, ]     <- par_curr$gamma
+      samples$log_sigma[keep_i, ] <- c(par_curr$log_sigma_z1,
+                                       par_curr$log_sigma_y1,
+                                       par_curr$log_sigma_y2)
+      samples$xi_u[keep_i, ]      <- c(par_curr$xi_z1_u,
+                                       par_curr$xi_y1_u,
+                                       par_curr$xi_y2_u)
+      samples$logpost[keep_i]     <- lp_curr
+    }
+
+    if (iter %% (Niter / 10) == 0) {
+      cat("iter", iter, "logpost", round(lp_curr, 1), "\n")
+    }
+  }
+
+  # final acceptance rates over last adaptation window (rough)
+  acc_rates <- c(
+    alpha = acc_alpha / max(1, tot_alpha),
+    beta  = acc_beta  / max(1, tot_beta),
+    gamma = acc_gamma / max(1, tot_gamma),
+    logs  = acc_logs  / max(1, tot_logs),
+    xi    = acc_xi    / max(1, tot_xi)
+  )
+
+  list(samples = samples,
+       final_par = par_curr,
+       final_logpost = lp_curr,
+       final_scales = list(
+         alpha = scale_alpha,
+         beta  = scale_beta,
+         gamma = scale_gamma,
+         logs  = scale_logs,
+         xi_u  = scale_xi_u
+       ),
+       acc_rates = acc_rates)
+}
+
+# ---- 9. 1-D depth table (like Table 1) ----
+compute_depth_table <- function(samples, cov_names) {
+  s <- samples
+  depth1d <- function(v) {
+    F0 <- mean(v <= 0)
+    4 * F0 * (1 - F0)
+  }
+
+  # transform xi_u -> xi
+  xi_z1_vec <- u_to_xi_z1(s$xi_u[,1])
+  xi_y1_vec <- u_to_xi_y(s$xi_u[,2])
+  xi_y2_vec <- u_to_xi_y(s$xi_u[,3])
+
+  # sigmas
+  sigma_mat <- exp(s$log_sigma)
+
+  depth_alpha     <- apply(s$alpha, 2, depth1d)
+  depth_beta_z1   <- depth1d(s$beta[,1])
+  depth_beta_X    <- apply(s$beta[,2:(p+1)], 2, depth1d)
+  depth_gamma_z1  <- depth1d(s$gamma[,1])
+  depth_gamma_y1  <- depth1d(s$gamma[,2])
+  depth_gamma_X   <- apply(s$gamma[,3:(p+2)], 2, depth1d)
+  depth_xi        <- c(depth1d(xi_z1_vec), depth1d(xi_y1_vec), depth1d(xi_y2_vec))
+  depth_sigma     <- apply(sigma_mat, 2, depth1d)
+
+  # main covariate rows
+  tbl <- data.frame(
+    Variable = cov_names,
+    MinCP   = round(depth_alpha,   4),
+    MaxWS   = round(depth_beta_X,  4),
+    Damages = round(depth_gamma_X, 4),
+    stringsAsFactors = FALSE
+  )
+
+  # rows for Min CP (scaled) and Max WS (scaled)
+  tbl <- rbind(
+    tbl,
+    data.frame(Variable = "Min CP (scaled)",
+               MinCP = NA,
+               MaxWS = round(depth_beta_z1,  4),
+               Damages = round(depth_gamma_z1,4),
+               stringsAsFactors = FALSE),
+    data.frame(Variable = "Max WS (scaled)",
+               MinCP = NA,
+               MaxWS = NA,
+               Damages = round(depth_gamma_y1,4),
+               stringsAsFactors = FALSE)
+  )
+
+  # xi and sigma rows
+  tbl <- rbind(
+    tbl,
+    data.frame(Variable = "xi",
+               MinCP = round(depth_xi[1],    4),
+               MaxWS = round(depth_xi[2],    4),
+               Damages = round(depth_xi[3],  4),
+               stringsAsFactors = FALSE),
+    data.frame(Variable = "sigma",
+               MinCP = round(depth_sigma[1], 4),
+               MaxWS = round(depth_sigma[2], 4),
+               Damages = round(depth_sigma[3],4),
+               stringsAsFactors = FALSE)
+  )
+
+  tbl
+}
+
+```
+```{r}
+# ---- 10. Example run ----
+# First do a small test:
+set.seed(123)
+mh_test <- run_mh(
+  Niter = 50000,   # try 50k first
+  burnin = 20000,
+  thin   = 10,
+  target_accept = 0.20
+)
+
+mh_test$acc_rates  # block-wise acceptance rates (last window)
+
+table1_test <- compute_depth_table(mh_test$samples, cov_names)
+print(table1_test)
+
+# For full paper-style run, increase Niter (e.g. 1e6) and maybe thin more.
+
+```
+```{r}
+library(coda)
+
+alpha_mat <- mh_test$samples$alpha  # n_keep x p
+
+# pick a few components
+par(mfrow=c(3,1))
+plot(ts(alpha_mat[,1]), main="Trace: alpha[1]")
+plot(ts(alpha_mat[,2]), main="Trace: alpha[2]")
+plot(ts(alpha_mat[,3]), main="Trace: alpha[3]")
+
+effectiveSize(alpha_mat[,1])
+effectiveSize(alpha_mat[,2])
+
+```
+```{r}
+library(parallel)
+library(coda)
+
+# -----------------------------
+# Parallel multi-chain runner
+# -----------------------------
+run_mh_parallel <- function(
+    n_chains = 4,
+    Niter = 50000,
+    burnin = 20000,
+    thin = 10,
+    target_accept = 0.20,
+    adapt_every = 1000
+) {
+
+  # seeds for reproducibility
+  seeds <- sample(1:9999999, n_chains)
+
+  # What variables/functions need to be exported?
+  needed_objects <- c(
+    "run_mh",
+    "init_par",  
+    "X", "Z1", "Y1", "Y2",
+    "log_post", "log_lik", "log_prior",
+    "gev_logpdf_vec", "inv_logit",
+    "u_to_xi_z1", "u_to_xi_y",
+    "xi_z1_lower","xi_z1_upper","xi_y_lower","xi_y_upper",
+    "cov_names", 
+    "p", "N","propose_block"
+  )
+
+  # Start cluster
+  cl <- makeCluster(n_chains)
+  clusterExport(cl, needed_objects, envir = environment())
+
+  # Wrapper to pass chain-specific seed
+  chain_wrapper <- function(seed) {
+    set.seed(seed)
+    run_mh(
+      Niter = Niter,
+      burnin = burnin,
+      thin = thin,
+      target_accept = target_accept,
+      adapt_every = adapt_every
+    )
+  }
+
+  # Run chains in parallel
+  results <- parLapply(cl, seeds, chain_wrapper)
+
+  stopCluster(cl)
+
+  return(results)
+}
+
+
+mh_chains <- run_mh_parallel(
+  n_chains = 4,
+  Niter = 100000,     # test values
+  burnin = 20000,
+  thin = 10
+)
+
+```
+```{r}
+alpha1_chains <- mcmc.list(
+  mcmc(mh_chains[[1]]$samples$alpha[,1]),
+  mcmc(mh_chains[[2]]$samples$alpha[,1]),
+  mcmc(mh_chains[[3]]$samples$alpha[,1]),
+  mcmc(mh_chains[[4]]$samples$alpha[,1])
+)
+
+gelman.diag(alpha1_chains)
+effectiveSize(alpha1_chains)
+
+```
+```{r}
+alpha1_chain_means <- sapply(mh_chains, function(ch) mean(ch$samples$alpha[,1]))
+alpha1_chain_means
+
+par(mfrow=c(2,2))
+for (k in 1:4) {
+  plot(ts(mh_chains[[k]]$samples$alpha[,1]),
+       main = paste("Chain", k, "alpha[1]"))
+}
+
+```
+```{r}
+# beta[1]
+beta1_chains <- mcmc.list(
+  mcmc(mh_chains[[1]]$samples$beta[,1]),
+  mcmc(mh_chains[[2]]$samples$beta[,1]),
+  mcmc(mh_chains[[3]]$samples$beta[,1]),
+  mcmc(mh_chains[[4]]$samples$beta[,1])
+)
+gelman.diag(beta1_chains)
+effectiveSize(beta1_chains)
+
+```
+```{r}
+beta1_chain_means <- sapply(mh_chains, function(ch) mean(ch$samples$beta[,1]))
+beta1_chain_means
+
+par(mfrow=c(2,2))
+for (k in 1:4) {
+  plot(ts(mh_chains[[k]]$samples$beta[,1]),
+       main = paste("Chain", k, "beta[1]"))
+}
+
+```
+```{r}
+beta_mat <- mh_chains[[1]]$samples$beta  # n_keep x p
+
+# pick a few components
+par(mfrow=c(3,1))
+plot(ts(beta_mat[,1]), main="Trace: alpha[1]")
+plot(ts(beta_mat[,2]), main="Trace: alpha[2]")
+plot(ts(beta_mat[,3]), main="Trace: alpha[3]")
+
+effectiveSize(beta_mat[,1])
+effectiveSize(beta_mat[,2])
+effectiveSize(beta_mat[,3])
+```
+```{r}
+gamma_mat <- mh_chains[[1]]$samples$gamma  # n_keep x p
+
+# pick a few components
+par(mfrow=c(2,2))
+plot(ts(gamma_mat[,1]), main="Trace: gamma[1]")
+plot(ts(gamma_mat[,2]), main="Trace: gamma[2]")
+plot(ts(gamma_mat[,3]), main="Trace: gamma[3]")
+plot(ts(gamma_mat[,4]), main="Trace: gamma[4]")
+
+effectiveSize(gamma_mat[,1])
+effectiveSize(gamma_mat[,2])
+effectiveSize(gamma_mat[,3])
+effectiveSize(gamma_mat[,4])
+```
+```{r}
+for (i in 1:4) print(mh_chains[[i]]$acc_rates)
+```
 
