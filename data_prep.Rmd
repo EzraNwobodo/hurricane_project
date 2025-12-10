@@ -353,7 +353,7 @@ X_raw2 = df[,c(28:34,1)]
 df = mutate(df, log_minCP = log(pressure), log_maxWS = log(windspeed), log_damage = log(mmh24))
 ```
 ```{r}
-
+library(rstan); library(bayesplot); library(loo)
 rstan_options(auto_write = TRUE)
 options(mc.cores = parallel::detectCores())
 
@@ -377,9 +377,17 @@ X <- as.matrix(X_raw2[, cov_names])
 X <- cbind(X[,9],X[,1:8])
 cov_names <- c( "intercept","lat", "lon", "sst", "soi", "nao", "nino", "month","year")
 
-Z1 <- df$log_minCP
+Z1 <- df$log_minCP 
+Z1_mean <- mean(Z1)
+Z1 <- Z1 - mean(Z1)
+
 Y1 <- df$log_maxWS
+Y1_mean <- mean(Y1)
+Y1 <- Y1 - mean(Y1)
+
 Y2 <- df$log_damage
+Y2_mean <- mean(Y2)
+Y2 <- Y2 - mean(Y2)
 
 stan_data <- list(
   N = nrow(df),
@@ -410,14 +418,42 @@ init_fun <- function() {
 stan_file <- "hurricane_project/gev_individual.stan"
 fit <- stan(file = stan_file,
             data = stan_data,
-            chains = 4, iter = 4000, warmup = 2000,
-            init = init_fun,
-            control = list(adapt_delta = 0.95, max_treedepth = 15))
+            chains = 4, iter = 6000, warmup = 3000,
+            control = list(adapt_delta = 0.999, max_treedepth = 15))
+
 
 print(fit, pars = c("alpha", "beta", "gamma", "sigma_z1_out", "sigma_y1_out", "sigma_y2_out",
                     "xi_z1", "xi_y1", "xi_y2"), probs = c(0.025, 0.5, 0.975))
 
 ```
+```{r}
+library(posterior)
+
+library(bayesplot)
+
+color_scheme_set("red")
+mcmc_pairs(
+  as_draws(fit),
+  pars = c("xi_z1", "xi_y1", "xi_y2",
+           "log_sigma_z1", "log_sigma_y1", "log_sigma_y2",
+           "alpha[1]", "beta[1]", "gamma[1]"),
+  np = nuts_params(fit)
+)
+
+
+```
+```{r}
+library(bayesplot)
+
+mcmc_trace(
+  as.array(fit),
+  pars = c("xi_z1", "xi_y1", "xi_y2",
+           "log_sigma_z1", "log_sigma_y1", "log_sigma_y2",
+           "alpha[1]", "beta[1]", "gamma[1]","gamma[2]","gamma[3]")
+)
+
+```
+
 ```{r}
 library(extRemes)
 post <- rstan::extract(fit)
@@ -1079,8 +1115,8 @@ compute_depth_table <- function(samples, cov_names) {
 # First do a small test:
 set.seed(123)
 mh_test <- run_mh(
-  Niter = 50000,   # try 50k first
-  burnin = 20000,
+  Niter = 30000,   # try 50k first
+  burnin = 10000,
   thin   = 10,
   target_accept = 0.20
 )
@@ -1108,6 +1144,33 @@ effectiveSize(alpha_mat[,1])
 effectiveSize(alpha_mat[,2])
 
 ```
+```{r}
+beta_mat <- mh_test$samples$beta  # n_keep x p
+
+# pick a few components
+par(mfrow=c(3,1))
+plot(ts(beta_mat[,1]), main="Trace: beta[1]")
+plot(ts(beta_mat[,2]), main="Trace: beta[2]")
+plot(ts(beta_mat[,3]), main="Trace: beta[3]")
+
+effectiveSize(beta_mat[,1])
+effectiveSize(beta_mat[,2])
+
+```
+```{r}
+gamma_mat <- mh_test$samples$gamma  # n_keep x p
+
+# pick a few components
+par(mfrow=c(3,1))
+plot(ts(gamma_mat[,1]), main="Trace: gamma[1]")
+plot(ts(gamma_mat[,2]), main="Trace: gamma[2]")
+plot(ts(gamma_mat[,3]), main="Trace: gamma[3]")
+
+effectiveSize(gamma_mat[,1])
+effectiveSize(gamma_mat[,2])
+
+```
+
 ```{r}
 library(parallel)
 library(coda)
@@ -1209,13 +1272,13 @@ effectiveSize(beta1_chains)
 
 ```
 ```{r}
-beta1_chain_means <- sapply(mh_chains, function(ch) mean(ch$samples$beta[,1]))
+beta1_chain_means <- sapply(mh_chains, function(ch) mean(ch$samples$beta[,2]))
 beta1_chain_means
 
 par(mfrow=c(2,2))
 for (k in 1:4) {
-  plot(ts(mh_chains[[k]]$samples$beta[,1]),
-       main = paste("Chain", k, "beta[1]"))
+  plot(ts(mh_chains[[k]]$samples$beta[,2]),
+       main = paste("Chain", k, "beta[2]"))
 }
 
 ```
