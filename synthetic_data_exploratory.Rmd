@@ -1,0 +1,183 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-12-12"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = '~/Downloads/data_sample')
+```
+```{r}
+library(ncdf4)
+library(hdf5r) 
+```
+
+```{r}
+nc <- nc_open("RAFT.NA.v202305.nc")
+print(nc)
+```
+```{r}
+lat   <- ncvar_get(nc, "lat")
+lon   <- ncvar_get(nc, "lon")
+vmax  <- ncvar_get(nc, "vmax")
+mslp  <- ncvar_get(nc, "mslp")
+rmax  <- ncvar_get(nc, "rmax")
+sid   <- ncvar_get(nc, "storm_ID")
+year  <- ncvar_get(nc, "year")
+
+nc_close(nc)
+
+```
+
+```{r}
+storm_id <- 100
+idx <- which(sid == storm_id)
+
+storm_lat <- lat[,idx]
+storm_lon <- lon[,idx]
+storm_vmax <- vmax[,idx]
+
+```
+
+```{r}
+f <- H5File$new("modeled_rainfall_ERA5_syn_49998.h5", mode = "r")
+print(f)
+
+rain   <- f[["p_accum"]]$read()
+rain_f <- f[["p_accum_f"]]$read()
+latlon <- f
+
+f$close()
+
+```
+
+```{r}
+grid <- H5File$new("latlon_grid.h5", mode = "r")
+lat <- grid[["lat"]]$read()
+lon <- grid[["lon"]]$read()
+grid$close()
+
+```
+
+```{r}
+lat_vec <- lat[1, ]   # length = ncol(rain) = 451
+lon_vec <- lon[, 1]   # length = nrow(rain) = 651
+
+range(lat_vec)
+range(lon_vec)
+
+nrow(rain_plot)
+ncol(rain_plot)
+
+image(lon_vec, lat_vec, rain,
+      col = topo.colors(40),
+      xlab = "Longitude",
+      ylab = "Latitude",
+      main = "RAFT synthetic storm rainfall")
+
+```
+
+```{r}
+storm_id  <- 49998
+icol      <- which(sid == storm_id)   # column index for this storm
+icol
+
+lon_s   <- lon[ , icol]
+lat_s   <- lat[ , icol]
+vmax_s  <- vmax[ , icol]
+
+# Remove padding / missing values (often NA or 0 over unused timesteps)
+good <- !is.na(lon_s) & !is.na(lat_s)
+lon_s  <- lon_s[good]
+lat_s  <- lat_s[good]
+vmax_s <- vmax_s[good]
+
+```
+```{r}
+# ---- plot rainfall background ----
+xlim <- range(lon_vec)
+ylim <- range(lat_vec)
+
+image(lon_vec, lat_vec, rain,
+      col  = topo.colors(40),
+      xlab = "Longitude", ylab = "Latitude",
+      xlim = xlim, ylim = ylim,
+      main = paste("Storm", storm_id, "- rainfall & track"))
+
+# coastlines
+map("world", add = TRUE, col = "grey20")
+
+# ---- color scale for intensity ----
+zlim   <- range(vmax_s, na.rm = TRUE)
+breaks <- seq(zlim[1], zlim[2], length.out = 101)
+cols   <- colorRampPalette(c("blue", "green", "yellow", "orange", "red"))(100)
+idx    <- cut(vmax_s, breaks = breaks, include.lowest = TRUE)
+
+# track on top
+segments(lon_s[-length(lon_s)], lat_s[-length(lat_s)],
+         lon_s[-1],             lat_s[-1],
+         col = cols[idx[-1]], lwd = 2)
+
+points(lon_s[1],          lat_s[1],          pch = 16, col = "black")
+points(tail(lon_s, 1), tail(lat_s, 1), pch = 17, col = "black")
+
+# intensity legend
+at         <- pretty(zlim, n = 5)
+col_at_idx <- round( (at - zlim[1]) / diff(zlim) * 99 ) + 1
+col_at_idx[col_at_idx < 1]   <- 1
+col_at_idx[col_at_idx > 100] <- 100
+col_at <- cols[col_at_idx]
+
+legend("topleft",
+       title  = "Max wind (kt)",
+       legend = round(at),
+       col    = col_at,
+       lwd    = 3,
+       bg     = "white",
+       cex    = 0.8)
+```
+
+```{r}
+# ---- map window ----
+xlim <- range(lon_s) + c(-5, 5)
+ylim <- range(lat_s) + c(-5, 5)
+
+# ---- color scale for intensity ----
+zlim   <- range(vmax_s, na.rm = TRUE)
+breaks <- seq(zlim[1], zlim[2], length.out = 101)  # 100 bins
+cols   <- colorRampPalette(c("blue", "green", "yellow", "orange", "red"))(100)
+idx    <- cut(vmax_s, breaks = breaks, include.lowest = TRUE)
+
+# ---- draw map + track ----
+map("world", xlim = xlim, ylim = ylim,
+    col = "grey80", fill = TRUE, bg = "white")
+box()
+
+# coloured segments for track
+segments(lon_s[-length(lon_s)], lat_s[-length(lat_s)],
+         lon_s[-1],             lat_s[-1],
+         col = cols[idx[-1]], lwd = 2)
+
+# mark start (●) and end (▲)
+points(lon_s[1],          lat_s[1],          pch = 16, col = "black")
+points(tail(lon_s, 1), tail(lat_s, 1), pch = 17, col = "black")
+
+title(main = paste("Storm", storm_id, "- track & max wind (kt)"),
+      xlab = "Longitude", ylab = "Latitude")
+
+# ---- legend for intensity ----
+at         <- pretty(zlim, n = 5)  # label values (kt)
+col_at_idx <- round( (at - zlim[1]) / diff(zlim) * 99 ) + 1
+col_at_idx[col_at_idx < 1]   <- 1
+col_at_idx[col_at_idx > 100] <- 100
+col_at <- cols[col_at_idx]
+
+legend("topleft",
+       title  = "Max wind (kt)",
+       legend = round(at),
+       col    = col_at,
+       lwd    = 3,
+       bg     = "white",
+       cex    = 0.8)
+```
+

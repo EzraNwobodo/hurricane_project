@@ -92,4 +92,18 @@ generated quantities {
   real sigma_z1_out = sigma_z1;
   real sigma_y1_out = sigma_y1;
   real sigma_y2_out = sigma_y2;
+
+  // NEW: pointwise log-likelihood for damages (Y2) only
+  vector[N] log_lik;
+  for (i in 1:N) {
+    real mu_z1 = dot_product(row(X, i), alpha);
+    real mu_y1 = beta[1] * Z1[i]
+                 + dot_product(row(X, i), beta[2:p+1]);
+    real mu_y2 = gamma[1] * Z1[i]
+                 + gamma[2] * Y1[i]
+                 + dot_product(row(X, i), gamma[3:p+2]);
+
+    // Only store the log-lik for Y2, since we're comparing DAMAGE predictions
+    log_lik[i] = gev1_lpdf(Y2[i] | mu_y2, sigma_y2, xi_y2);
+  }
 }

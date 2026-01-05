@@ -1,0 +1,58 @@
+---
+title: "Comparison"
+output: html_document
+date: "2025-12-12"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = '~/Downloads/hurricane_project')
+```
+
+```{r}
+## ----load-fits-----------------------------------------------------------
+library(rstan)
+library(loo)
+
+fit_no_ike <- readRDS("fit_no_ike.rds")
+fit_ike    <- readRDS("fit_ike.rds")
+
+# Extract log_lik matrices: draws x N
+ll_no_ike <- loo::extract_log_lik(fit_no_ike, parameter_name = "log_lik")
+ll_ike    <- loo::extract_log_lik(fit_ike,    parameter_name = "log_lik")
+
+```
+
+```{r}
+## ----loo-compare---------------------------------------------------------
+loo_no_ike <- loo::loo(ll_no_ike)
+loo_ike    <- loo::loo(ll_ike)
+
+print(loo_no_ike)
+print(loo_ike)
+
+# Direct comparison
+loo_compare(loo_no_ike, loo_ike)
+
+```
+
+```{r}
+## ----waic-compare--------------------------------------------------------
+waic_no_ike <- loo::waic(ll_no_ike)
+waic_ike    <- loo::waic(ll_ike)
+
+print(waic_no_ike)
+print(waic_ike)
+
+loo_compare(waic_no_ike, waic_ike)
+
+```
+
+```{r}
+aic_like_no_ike <- -2 * waic_no_ike$estimates["elpd_waic", "Estimate"]
+aic_like_ike    <- -2 * waic_ike$estimates["elpd_waic", "Estimate"]
+
+c(aic_like_no_ike = aic_like_no_ike,
+  aic_like_ike    = aic_like_ike)
+
+```
+

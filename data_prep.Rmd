@@ -418,6 +418,7 @@ init_fun <- function() {
 stan_file <- "hurricane_project/gev_individual.stan"
 fit <- stan(file = stan_file,
             data = stan_data,
+            init = init_fun,
             chains = 4, iter = 6000, warmup = 3000,
             control = list(adapt_delta = 0.999, max_treedepth = 15))
 
@@ -425,6 +426,7 @@ fit <- stan(file = stan_file,
 print(fit, pars = c("alpha", "beta", "gamma", "sigma_z1_out", "sigma_y1_out", "sigma_y2_out",
                     "xi_z1", "xi_y1", "xi_y2"), probs = c(0.025, 0.5, 0.975))
 
+saveRDS(fit, "hurricane_project/fit_no_ike.rds")
 ```
 ```{r}
 library(posterior)
@@ -465,6 +467,7 @@ mean(mu_z1)
 mean(mu_y1)
 mean(mu_y2)
 
+S=12000
 Z1_harvey = revd(S,loc=mu_z1,scale=post$sigma_z1,shape=post$xi_z1,type="GEV")
 Y1_harvey = revd(S,loc=mu_y1,scale=post$sigma_y1,shape=post$xi_y1,type="GEV")
 Y2_harvey = revd(S,loc=mu_y2,scale=post$sigma_y2,shape=post$xi_y2,type="GEV")

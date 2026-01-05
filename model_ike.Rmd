@@ -1,0 +1,611 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-12-12"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = '~/Downloads')
+```
+
+```{r}
+library(tibble)
+library(terra)
+library(dplyr)
+library(comprehenr)
+library(lubridate)
+
+setwd('~/Downloads')
+
+end_year = 2024
+amo = read.table("hurricane_project/amon.us.long.data.txt",strip.white = TRUE)
+months = as.vector(amo[1,])
+colnames(amo) = months
+amo = amo[-1,]
+amo = amo[amo$Year>=1960,]
+amo = amo[amo$Year<=end_year,]
+amo = amo %>% mutate(amo=(as.numeric(May)+as.numeric(Jun))/2 )
+
+soi = read.table("hurricane_project/soi.txt",strip.white = TRUE)
+colnames(soi) = months
+soi = soi[soi$Year>=1960,]
+soi = soi[soi$Year<=end_year,]
+soi = soi %>% mutate(soi=(as.numeric(May)+as.numeric(Jun))/2 )
+
+nao = read.table("hurricane_project/nao.data.txt",strip.white = TRUE)
+colnames(nao) = months
+nao[nao$Year>=1960,]
+nao = nao[nao$Year>=1960,] 
+nao = nao[nao$Year<=end_year,]
+nao = nao %>% mutate(nao=(as.numeric(May)+as.numeric(Jun))/2 )
+
+nino = read.table("hurricane_project/nino.ascii",strip.white = TRUE)
+nino = nino[-1,c(1,2,9)]
+foo = matrix(NA, nrow=76, ncol=12)
+count=1
+for (i in 1:76){
+  for (j in 1:12){
+    foo[i,j]=nino[count,3]
+    count = count+1
+    if(count==911) break
+  }
+}
+foo = data.frame(foo)
+nino = add_column(foo, Year = 1950:2025,.before="X1")
+colnames(nino)=months
+nino = nino[nino$Year>=1960,]
+nino = nino[nino$Year<=end_year,]
+nino = nino %>% mutate(nino=(as.numeric(May)+as.numeric(Jun))/2 )
+```
+```{}
+tmpdir <- tempdir()
+untar("hurricane_project/sst.tar.gz", exdir = tmpdir)
+
+nc_files <- list.files(tmpdir, pattern = "\\.nc$", full.names = TRUE, recursive=TRUE)
+nc_files
+
+```
+```{}
+
+file <- nc_files[grepl("/tmp/RtmpXueFnm/data/netcdf3.0.2new/degree1/enh/sst.mean.nc", nc_files)]
+
+r <- rast(file)
+r
+
+```
+```{}
+df1 <- as.data.frame(r, xy = TRUE)
+head(df1)
+
+```
+```{}
+write.csv(df1,"hurricane_project/sst_raw.csv", row.names = FALSE)
+```
+```{r}
+setwd('~/Downloads')
+list.files()
+df1 = read.csv("hurricane_project/sst_raw.csv")
+df1 = filter(df1, x >= 280  & x <= 340)
+df1 = filter(df1, y >= 10  & y <= 25)
+```
+```{r}
+month = seq(as.Date("1960-01-01"), as.Date("2025-07-01"), by="month")
+sst_mean = to_vec(for(i in 3:789) mean(df1[,i],na.rm=T))
+
+sst_month = data.frame(date=month, sst_mean=sst_mean)
+sst_month = mutate(sst_month, year=year(date))
+
+may_jun = to_vec(for(i in 1:66) (sst_month[12*(i-1)+5,2] + sst_month[12*(i-1)+6,2])/2 )
+sst = data.frame(Year = 1960:2025, sst=may_jun)
+sst = sst[sst$Year<=end_year,]
+```
+
+
+```{r}
+setwd('~/Downloads')
+loss = read.csv("hurricane_project/08302025_2024_aggregate.csv")
+met = read.csv("hurricane_project/lf_matched_metrics-1.csv")
+hurdat = read.csv("hurricane_project/hurdat_track-1761700598833-1.csv")
+
+df = merge(loss,met,by=c("storm_year","storm_name","storm_basin"))
+df = df[df$storm_year >= 1960,]
+df = df[,-3]
+
+hurdat = hurdat[hurdat$storm_year >= 1960,]
+
+# removing multiple landfalls, not relevant for this model
+df = filter(df, lf_id == 1)
+d = duplicated(df$hurdatId)
+df = df[!d,]
+```
+
+```{r}
+hurdat2 = filter(hurdat, !(storm_status %in% c('TD','DB','LO','WV','SD')))
+```
+
+```{r}
+name=''
+for (i in 1:nrow(hurdat2)){
+  if (hurdat2[i,]$storm_name != name) name = hurdat2[i,]$storm_name
+  else hurdat2[i,]$storm_name=NA
+}
+```
+
+```{r}
+dupe = is.na(hurdat2$storm_name)
+hurdat2 = hurdat2[!dupe,]
+```
+```{r}
+hurdat2 = mutate(hurdat2, ID=paste(as.character(storm_year),storm_name))
+df = mutate(df, ID=paste(as.character(storm_year),storm_name))
+```
+```{r}
+season = merge(hurdat2,df,by='ID',all=T)
+season = season[,c(3,4,5,30,31)]
+colnames(season) = c('storm_year','storm_name','datetime','mmh24','mmp24')
+season = season %>% mutate(storm_year_alt = ifelse(month(datetime)==1,storm_year-1,storm_year),mmp24 = ifelse(is.na(mmp24),0,mmp24),mmh24 = ifelse(is.na(mmh24),0,mmh24))
+
+```
+```{r}
+# dropped amo because data only until 2022, fix later
+# data prep
+
+N_obs = rep(NA,2025-1960)
+count=0
+year = 1960
+for (i in season$storm_year_alt){
+  if(i == year) count = count+1
+  else{
+    year = i
+    N_obs[year-1960] = count
+    count = 1
+  }
+}
+N_obs[65] = count
+
+row=1
+count=0
+L_obs = rep(NA,2025-1960)
+for (i in 1:65){
+  for (j in 1:N_obs[i]){
+    if (season$mmh24[row] > 0) count = count+1
+    row = row + 1
+  }
+  L_obs[i]=count
+  count = 0
+}
+
+row=1
+count=0
+D_obs = rep(NA,2025-1960)
+for (i in 1:65){
+  for (j in 1:N_obs[i]){
+    if (season$mmh24[row] > 0) count = count+season$mmh24[row]
+    row = row + 1
+  }
+  D_obs[i]=count
+  count = 0
+}
+
+Xraw = as.matrix(data.frame(sst$sst,soi$soi,nao$nao,nino$nino))
+```
+
+
+```{r}
+# GEV
+df = merge(loss,met,by=c("storm_year","storm_name","storm_basin"))
+df = df[df$storm_year >= 1960,]
+df = df[,-3]
+
+# removing multiple landfalls, not relevant for this model
+df = filter(df, lf_id == 1)
+d = duplicated(df$hurdatId)
+df = df[!d,]
+
+X_year = cbind(Xraw, storm_year = 1960:2024)
+
+df = merge(df, X_year, by="storm_year")
+df = filter(df, is.na(windspeed)==FALSE, is.na(pressure)==FALSE)
+df = mutate(df, month = month(datetime))
+X_raw2 = df[,c(28:34,1)]
+
+df = mutate(df, log_minCP = log(pressure), log_maxWS = log(windspeed), log_damage = log(mmh24))
+```
+
+```{r}
+# We fill in missing values for radius of maximum wind in preparation for computing IKE
+df$rmw[is.na(df$rmw)] <- median(df$rmw, na.rm = TRUE)
+
+df<- df %>%
+  mutate(
+    ike = (pi/4) * (
+      34^2 * pmax(ne_34kt - pmax(rmw, ne_50kt), 0)^2 +
+      50^2 * pmax(ne_50kt - pmax(rmw, ne_64kt), 0)^2 +
+      64^2 * pmax(ne_64kt - rmw, 0)^2 +
+
+      34^2 * pmax(sw_34kt - pmax(rmw, sw_50kt), 0)^2 +
+      50^2 * pmax(sw_50kt - pmax(rmw, sw_64kt), 0)^2 +
+      64^2 * pmax(sw_64kt - rmw, 0)^2 +
+
+      34^2 * pmax(se_34kt - pmax(rmw, se_50kt), 0)^2 +
+      50^2 * pmax(se_50kt - pmax(rmw, se_64kt), 0)^2 +
+      64^2 * pmax(se_64kt - rmw, 0)^2 +
+
+      34^2 * pmax(nw_34kt - pmax(rmw, nw_50kt), 0)^2 +
+      50^2 * pmax(nw_50kt - pmax(rmw, nw_64kt), 0)^2 +
+      64^2 * pmax(nw_64kt - rmw, 0)^2
+    )
+  )
+
+df = mutate(df, log_ike = log(ike)) 
+
+X_raw2$intercept <- 1
+cov_names <- c( "lat", "lon", "sst", "soi", "nao", "nino", "month","year","intercept")
+colnames(X_raw2)=cov_names
+p <- length(cov_names)
+
+# Scale covariates (except intercept)
+scale_cols <- setdiff(cov_names, "intercept")
+X_raw2[scale_cols] <- scale(X_raw2[scale_cols])
+
+X <- as.matrix(X_raw2[, cov_names])
+X <- cbind(X[,9],X[,1:8])
+cov_names <- c( "intercept","lat", "lon", "sst", "soi", "nao", "nino", "month","year")
+
+Z1 <- df$log_minCP 
+Z1_mean <- mean(Z1)
+Z1 <- Z1 - mean(Z1)
+
+Y1 <- df$log_maxWS
+Y1_mean <- mean(Y1)
+Y1 <- Y1 - mean(Y1)
+
+Y2 <- df$log_damage
+Y2_mean <- mean(Y2)
+Y2 <- Y2 - mean(Y2)
+
+Z2_obs <- df$log_ike[is.na(df$log_ike)==FALSE]
+Z2_mean <- mean(Z2_obs)
+Z2_obs <- Z2_obs - mean(Z2_obs)
+
+# Index positions for missing IKE values
+idx_obs_z2 <- which(is.na(df$log_ike)==FALSE)
+idx_mis_z2 <- which(is.na(df$log_ike))
+
+N_obs_z2 = length(idx_obs_z2)
+N_mis_z2 = length(idx_mis_z2)
+```
+
+```{r}
+library(rstan); library(bayesplot); library(loo)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+
+stan_data <- list(
+  N = nrow(df),
+  p = p,
+  X = X,
+  Z1 = as.numeric(Z1),
+  Y1 = as.numeric(Y1),
+  Y2 = as.numeric(Y2),
+  Z2_obs = as.vector(Z2_obs),
+  
+  idx_obs_z2 = idx_obs_z2,
+  idx_mis_z2 = idx_mis_z2,
+  
+  N_obs_z2 = N_obs_z2,
+  N_mis_z2 = N_mis_z2
+  )
+
+# --- Compile and fit ---
+init_fun <- function() {
+  list(
+    # Z2 (log IKE) model params
+    delta       = rnorm(p + 2, 0, 0.05),  # small regression coefs for IKE
+    Z2_mis      = rep(0, N_mis_z2),       # latent IKE start near 0
+    log_sigma_z2 = log(1),                # sd(log IKE) ~ 1
+
+    # Existing regression parameters
+    alpha = rnorm(p,   0, 0.05),
+    beta  = rnorm(p+1, 0, 0.05),
+    gamma = rnorm(p+3, 0, 0.05),
+
+    # GEV scales
+    log_sigma_z1 = log(3),
+    log_sigma_y1 = log(3),
+    log_sigma_y2 = log(3),
+
+    # GEV shapes start at 0 (Gumbel)
+    xi_raw_z1 = 0,
+    xi_raw_y1 = 0,
+    xi_raw_y2 = 0
+  )
+}
+
+stan_file <- "hurricane_project/gev_ike.stan"
+fit <- stan(file = stan_file,
+            data = stan_data,
+            init = init_fun,
+            chains = 4, iter = 6000, warmup = 3000,
+            control = list(adapt_delta = 0.999, max_treedepth = 15))
+
+
+print(fit, pars = c("alpha", "beta", "gamma", "delta", "sigma_z1_out", "sigma_y1_out", "sigma_y2_out",
+                    "xi_z1", "xi_y1", "xi_y2"), probs = c(0.025, 0.5, 0.975))
+
+saveRDS(fit, "fit_ike.rds")
+```
+```{r}
+saveRDS(fit, "hurricane_project/fit_ike.rds")
+```
+
+
+```{r}
+## ----depth-helper--------------------------------------------------------
+library(rstan)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(bayesplot)
+
+# 1D depth used in the paper:
+# depth(β) = 4 * F_hat(0) * (1 - F_hat(0)),
+# where F_hat(0) = P(β <= 0) estimated from MCMC draws.
+depth_1d <- function(samples) {
+  F0 <- mean(samples <= 0)
+  4 * F0 * (1 - F0)
+}
+
+# Extract posterior draws as arrays/matrices
+post <- rstan::extract(fit)
+
+# Convenience: number of covariates
+p <- length(cov_names)  # should match 'p' in Stan data
+
+```
+```{r}
+## ----depth-compute-------------------------------------------------------
+# 1) MinCP (Z1) layer
+depth_minCP_cov <- apply(post$alpha, 2, depth_1d)
+names(depth_minCP_cov) <- cov_names
+
+# 2) MaxWS (Y1) layer
+depth_maxWS_minCP <- depth_1d(post$beta[, 1])                  # effect of Z1 on Y1
+depth_maxWS_cov   <- apply(post$beta[, 2:(p+1)], 2, depth_1d)  # covariates
+names(depth_maxWS_cov) <- cov_names
+
+# 3) IKE (Z2, lognormal) layer
+depth_IKE_minCP <- depth_1d(post$delta[, 1])                   # effect of Z1 on Z2
+depth_IKE_maxWS <- depth_1d(post$delta[, 2])                   # effect of Y1 on Z2
+depth_IKE_cov   <- apply(post$delta[, 3:(p+2)], 2, depth_1d)   # covariates
+names(depth_IKE_cov) <- cov_names
+
+# 4) Damages (Y2) layer
+depth_dmg_minCP <- depth_1d(post$gamma[, 1])                   # effect of Z1 on Y2
+depth_dmg_maxWS <- depth_1d(post$gamma[, 2])                   # effect of Y1 on Y2
+depth_dmg_IKE   <- depth_1d(post$gamma[, 3])                   # effect of Z2 on Y2
+depth_dmg_cov   <- apply(post$gamma[, 4:(p+3)], 2, depth_1d)   # covariates
+names(depth_dmg_cov) <- cov_names
+
+# 5) Scales & shapes (using transformed versions)
+xi_z1   <- 0.7 * tanh(post$xi_raw_z1)
+xi_y1   <- 0.5 * tanh(post$xi_raw_y1)
+xi_y2   <- 0.5 * tanh(post$xi_raw_y2)
+
+sigma_z1 <- exp(post$log_sigma_z1)
+sigma_y1 <- exp(post$log_sigma_y1)
+sigma_y2 <- exp(post$log_sigma_y2)
+
+depth_xi_z1   <- depth_1d(xi_z1)
+depth_xi_y1   <- depth_1d(xi_y1)
+depth_xi_y2   <- depth_1d(xi_y2)
+
+depth_sigma_z1 <- depth_1d(sigma_z1)
+depth_sigma_y1 <- depth_1d(sigma_y1)
+depth_sigma_y2 <- depth_1d(sigma_y2)
+
+```
+
+```{r}
+## ----depth-table---------------------------------------------------------
+# Base rows: climate / exposure covariates
+base_rows <- cov_names
+
+depth_df_cov <- tibble(
+  variable = base_rows,
+  MinCP    = depth_minCP_cov[variable],
+  MaxWS    = depth_maxWS_cov[variable],
+  IKE      = depth_IKE_cov[variable],
+  Damages  = depth_dmg_cov[variable]
+)
+
+# Cross-layer parameters (effects of other layers)
+depth_df_cross <- tibble(
+  variable = c(
+    "MinCP -> MaxWS",
+    "MinCP -> IKE",
+    "MaxWS -> IKE",
+    "MinCP -> Damages",
+    "MaxWS -> Damages",
+    "IKE -> Damages"
+  ),
+  MinCP   = c(NA, NA, NA, NA, NA, NA),
+  MaxWS   = c(depth_maxWS_minCP, NA, NA, NA, NA, NA),
+  IKE     = c(NA, depth_IKE_minCP, depth_IKE_maxWS, NA, NA, NA),
+  Damages = c(NA, NA, NA,
+              depth_dmg_minCP,
+              depth_dmg_maxWS,
+              depth_dmg_IKE)
+)
+
+# Scale & shape parameters
+depth_df_gev <- tibble(
+  variable = c("xi (MinCP)", "xi (MaxWS)", "xi (Damages)",
+               "sigma (MinCP)", "sigma (MaxWS)", "sigma (Damages)"),
+  MinCP   = c(depth_xi_z1,  NA,           NA,
+              depth_sigma_z1, NA,         NA),
+  MaxWS   = c(NA,           depth_xi_y1,  NA,
+              NA,           depth_sigma_y1, NA),
+  IKE     = c(NA, NA, NA, NA, NA, NA),  # no shape/scale in lognormal layer
+  Damages = c(NA,           NA,          depth_xi_y2,
+              NA,           NA,          depth_sigma_y2)
+)
+
+depth_table <- bind_rows(
+  depth_df_cov,
+  depth_df_cross,
+  depth_df_gev
+) %>%
+  arrange(match(variable,
+                c(base_rows,
+                  "MinCP -> MaxWS", "MinCP -> IKE", "MaxWS -> IKE",
+                  "MinCP -> Damages", "MaxWS -> Damages", "IKE -> Damages",
+                  "xi (MinCP)", "xi (MaxWS)", "xi (Damages)",
+                  "sigma (MinCP)", "sigma (MaxWS)", "sigma (Damages)"))
+  )
+
+# View as a nice table
+knitr::kable(depth_table, digits = 4,
+             caption = "1D depth values (closer to 0 = more 'relevant'), extended with IKE layer")
+
+```
+
+```{r}
+## ----diag-traceplots, fig.width=8, fig.height=6--------------------------
+mcmc_draws <- rstan::extract(fit, permuted = FALSE)  # iteration x chain x param
+
+# bayesplot likes an array with named parameters
+posterior_array <- as.array(fit)
+
+# Pick a few parameters to check
+params_trace <- c(
+  "alpha[1]",          # MinCP intercept
+  "beta[2]",           # MaxWS intercept (assuming X[,1] is intercept)
+  "delta[3]",          # IKE intercept (assuming X[,1] is intercept)
+  "gamma[4]",          # Damages intercept (assuming X[,1] is intercept)
+  "gamma[3]"           # Effect of IKE on damages
+)
+
+bayesplot::mcmc_trace(posterior_array, pars = params_trace, n_warmup = 0)
+
+```
+
+```{r}
+## ----diag-density-ike-damage, fig.width=6, fig.height=4------------------
+ike_dmg <- post$gamma[, 3]  # effect of log(IKE) on log(damages)
+
+ggplot(data.frame(ike_dmg = ike_dmg), aes(x = ike_dmg)) +
+  geom_density() +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+  labs(
+    title = "Posterior for effect of log(IKE) on log(damages)",
+    x = "gamma[3] (IKE → damages)",
+    y = "Density"
+  )
+
+```
+```{r}
+## ----coef-densities-ike-vs-cp-ws, fig.width=7, fig.height=4--------------
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# extract the three key coefficients from damage model
+cp_eff  <- post$gamma[, 1]   # Z1 -> damage
+ws_eff  <- post$gamma[, 2]   # Y1 -> damage
+ike_eff <- post$gamma[, 3]   # Z2 -> damage
+
+coef_df <- data.frame(
+  cp  = cp_eff,
+  ws  = ws_eff,
+  ike = ike_eff
+) %>%
+  tidyr::pivot_longer(
+    cols = everything(),
+    names_to = "predictor",
+    values_to = "beta"
+  )
+
+ggplot(coef_df, aes(x = beta, fill = predictor)) +
+  geom_density(alpha = 0.4) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Posterior effects on log(damages)",
+    x = "Regression coefficient",
+    y = "Density"
+  ) +
+  theme_minimal()
+
+
+```
+```{r}
+## ----reconstruct-Z2-and-preds--------------------------------------------
+N = nrow(df)
+# 1) posterior mean of gamma coefficients
+gamma_bar <- colMeans(post$gamma)  # length p+3
+
+# 2) Get a single best estimate of Z2 (log IKE) for each storm
+#    observed storms: just use Z2_obs (already centered)
+#    missing storms: use posterior mean of each Z2_mis[m]
+Z2_hat <- numeric(N)
+Z2_hat[idx_obs_z2] <- Z2_obs
+
+if (length(idx_mis_z2) > 0) {
+  Z2_mis_bar <- apply(post$Z2_mis, 2, mean)  # posterior mean for each missing storm
+  Z2_hat[idx_mis_z2] <- Z2_mis_bar
+}
+
+# 3) predicted mean log damages with and without the IKE term
+# mu_full = gamma1*Z1 + gamma2*Y1 + gamma3*Z2 + X %*% gamma4+
+linpred_X <- as.vector(X %*% gamma_bar[4:(p+3)])
+
+mu_full   <- gamma_bar[1] * Z1 + gamma_bar[2] * Y1 +
+             gamma_bar[3] * Z2_hat + linpred_X
+
+mu_no_ike <- mu_full - gamma_bar[3] * Z2_hat  # just drop the IKE contribution
+
+# assemble in a data frame with actual outcomes and squared errors
+comp_df <- data.frame(
+  storm       = 1:N,
+  log_damage  = Y2,
+  mu_full     = mu_full,
+  mu_no_ike   = mu_no_ike,
+  se_full     = (Y2 - mu_full)^2,
+  se_no_ike   = (Y2 - mu_no_ike)^2,
+  Z2_hat      = Z2_hat
+)
+
+comp_df <- comp_df %>%
+  mutate(improvement = formatC(se_no_ike - se_full,digits=3))  # >0 means IKE reduced squared error
+
+```
+
+```{r}
+## ----ike-improvement-plot, fig.width=7, fig.height=4---------------------
+ggplot(comp_df, aes(x = Z2_hat, y = improvement)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  geom_point(alpha = 0.6) +
+  labs(
+    title = "Per-storm improvement in squared error from including log(IKE)",
+    x = "log(IKE) (posterior mean, centred)",
+    y = "SE(no IKE) - SE(with IKE)"
+  ) +
+  theme_minimal()
+
+```
+```{r}
+comp_df$improvement <- as.numeric(comp_df$improvement)
+
+ggplot(comp_df, aes(x = improvement)) +
+  geom_histogram(bins = 35, color = "white") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Distribution of improvement from including log(IKE)",
+    x = "SE(no IKE) - SE(with IKE)",
+    y = "Count"
+  ) +
+  theme_minimal()
+
+```
+
